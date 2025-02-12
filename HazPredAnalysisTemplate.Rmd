@@ -1,0 +1,214 @@
+---
+title: "Study4Validation"
+author: "TGoodge"
+date: '2023-07-25'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+#Libraries
+
+```{r}
+
+library(tidyverse)
+library(splitstackshape)
+library(stringr)
+library(data.table)
+library(dplyr)
+library(tidyr)
+library(gridExtra)
+library(lme4)
+library(lmerTest)
+library(afex)
+library(effects)
+library(ggplot2)
+library(ggthemes)
+library(report)
+library(janitor)
+library(cowplot)
+library(pwr)
+
+```
+#Read in WHNData data
+```{r}
+#Give R the path to where the data is stored. Typically PsychoPy saves this in a folder called 'data' in the same location as the experiment file.
+dataFolder = "%PATH%TO%YOUR%DATA%FOLDER"
+#Retrieve all the files in the dataFolderwith the filetype 'csv'. This is the default format saved by PsychoPy
+file_list <- list.files(path = dataFolder, pattern = "..csv$", all.files = TRUE, full.names = TRUE, recursive = TRUE) 
+```
+
+```{r}
+#Create an empty dataframe to add each participant's data to
+RawWHNDataset <- data.frame()
+#loop through all the fills, create a temporary container, remove the first, second and last rows and then add 1 to the trials counter. Then bind it to the dataset
+for (file in file_list){
+  tempData <- read.csv(file, header = T)  
+    
+  RawWHNDataset <- bind_rows(RawWHNDataset, tempData)
+}
+```
+
+#Run this code is PsychoPy does not record correct responses properly:
+
+```{r}
+#In some cases Psychopy adds extraneous characters ['] to values when recording responses from a keyboard. If this is the case, the code below will remove those characters and make sure that the correct responses are properly recorded.
+
+
+#Remove extraneous characters that PsychoPy added into the response key and CorrAns columns, using the stringr package
+RawWHNDataset$trialrespkey.keys <-stringr::str_remove_all(RawWHNDataset$trialrespkey.keys,"[\\[\\]]")
+RawWHNDataset$trialrespkey.keys <-stringr::str_remove_all(RawWHNDataset$trialrespkey.keys,"[\\']")
+
+RawWHNDataset$CorrAns <-stringr::str_remove_all(RawWHNDataset$CorrAns,"[\\[\\]]")
+
+RawWHNDataset$trialrespkey.rt <-stringr::str_remove_all(RawWHNDataset$trialrespkey.rt,"[\\[\\]]")
+
+#Update the trialrespkey.corr columns
+RawWHNDataset$trialrespkey.corr <- if_else(RawWHNDataset$trialrespkey.keys == RawWHNDataset$CorrAns,1,0)
+
+
+
+```
+
+#Sort WHN dataset
+
+```{r}
+
+#Remove rows from the dataset which are not responses to a WHN clip. Then select the relevant columns for analysis. 
+SortedWHNData <- subset(RawWHNDataset,end_resp.keys != "space" ) %>% 
+  select(participant, condition, trialrespkey.corr, video_file, trialrespkey.rt)
+SortedWHNData$video_file <- str_sub(SortedWHNData$video_file, end = -8)
+
+#Retrieve the number of participants in the datafile
+nPpts <- n_distinct(SortedWHNData$participant)
+#Create a dataframe of each participant's ID (Used for sanity checking)
+IDs <- SortedWHNData[!duplicated(SortedWHNData$participant), ]
+
+#Set the data type of the reaction time column to numeric
+SortedWHNData$trialrespkey.rt <- as.numeric(SortedWHNData$trialrespkey.rt)
+
+#Placeholder column for labelling different groups
+SortedWHNData$Group <- 'default'
+
+#optional write datafile as a csv file so the above code only needs to be run once.
+#write.csv(SortedWHNData, "WHNFull.csv")
+
+
+
+
+
+```
+
+#Separate IDs for filtering if necessary
+```{r}
+IDs <- SortedWHNData %>% 
+  group_by(participant) %>% 
+  select(participant)
+
+IDs <- IDs[!duplicated(IDs$participant), ]
+
+n_distinct(IDs$participant)
+
+IDs$Valid = TRUE
+
+
+  
+```
+
+
+
+#Clip Summary
+
+```{r}
+#Summarise the number of correct responses for each videoclip into a dataframe
+SummaryClipWHN <- SortedWHNData %>% 
+  group_by(video_file) %>% 
+  summarise(n = n() ,
+            WHN = sum(trialrespkey.corr) ,
+            WHNPercent =   sum(trialrespkey.corr) / nPpts*100)
+```
+#Plot Clip Summary
+```{r}
+#Retrieve the number of clips presented in the test
+nClips <- length(SortedWHNData$video_file) / nPpts
+#Create a column plot showing the frequency of correct answers for each clip in the test
+ggplot(data = SummaryClipWHN, aes(x = video_file, y = WHN, fill = video_file))+
+  geom_col()+
+  geom_hline(yintercept = nClips/4)+
+  ylim(0,nPpts)+ #change the value here to the number of clips you use
+  theme(axis.text.x = element_text(angle = 90))
+```
+
+```{r}
+#Seperate out clips depending on the averages scores for them. Clips with less than 50% were too difficult, clips with more than 90% were too easy, clips with less thatn 25% performance was no better than guessing an option at random
+HardClips <- subset(SummaryClipWHN, WHNPercent <= 0.5)
+
+EasyClips <- subset(SummaryClipWHN, WHNPercent > 0.9)
+
+ChanceClips <- subset(SummaryClipWHN, WHNPercent <= 0.25)
+```
+
+
+#Participant Summary
+```{r}
+#Summarise the number of correct responses for each participant into a dataframe
+
+SummaryPptWHN <-SortedWHNData %>% 
+  group_by(participant) %>% 
+  summarise(n = n(),
+            Score = sum(trialrespkey.corr),
+            meanRT = mean(trialrespkey.rt, na.rm = T))
+
+SummaryPptWHN <- rowid_to_column(SummaryPptWHN , "ID")
+SummaryPptWHN$ID <- as.character(SummaryPptWHN$ID)
+
+SummaryPptWHN <- SummaryPptWHN[!duplicated(SummaryPptWHN$participant), ]
+
+SummaryPptWHN$meanScore <- SummaryPptWHN$Score/nClips
+
+
+
+```
+
+
+#Plot each participant WHN scores
+
+```{r}
+
+#Create a column plot showing the frequency of correct answers for each clip in the test
+
+ggplot(data = SummaryPptWHN, aes(x = participant, y = Score, fill = participant))+
+  geom_col()+
+  ylim (0,nClips)+
+  labs(y = "Average number of Correct responses")+
+  scale_fill_brewer(palette = "Set1")+
+  theme_classic()
+
+
+```
+```{r}
+#Summarise the number of correct responses for each videoclip into a dataframe
+SummaryCondWHN <- SortedWHNData %>% 
+  group_by(condition) %>% 
+  summarise(n = n() ,
+            WHN = sum(trialrespkey.corr) ,
+            WHNPercent =   sum(trialrespkey.corr) / nPpts*100)
+
+SummaryCondWHN$meanScore <- SummaryCondWHN$Score/nClips
+
+```
+
+
+
+```{r}
+ggplot(data = SummaryCondWHN, aes(x = condition, y = meanScore, fill = condition))+
+  geom_violin(alpha = 0.4)+
+  geom_boxplot(width = 0.2)+
+  ylim (0,1)+
+  labs(y = "Average number of Correct responses")+
+  scale_fill_brewer(palette = "Set1")+
+  theme_classic()
+
+```
+
